@@ -3,16 +3,20 @@
 
 module StackCom
   ( projectName,
-  comp,
-  exec,
-  run,
-  fac
+    comp,
+    exec,
+    run,
+    fac,
   )
 where
 
 import Control.Monad.State
-    ( evalState, execState, MonadState(put, get), State )
-import Data.Maybe ( fromMaybe )
+  ( MonadState (get, put),
+    State,
+    evalState,
+    execState,
+  )
+import Data.Maybe (fromMaybe)
 
 projectName :: String
 projectName = "StackCom"
@@ -57,7 +61,7 @@ type Label = Int
 --  Compiler
 
 comp :: Prog -> Code
-comp prog = rewriteLabels $ evalState (comp' prog) 0
+comp prog = rewriteJumps $ evalState (comp' prog) 0
 
 comp' :: Prog -> State Label Code
 comp' (Assign name expr) = return $ compExpr expr ++ [POP name]
@@ -99,11 +103,11 @@ type LabelTable = [(Label, Int)]
 labels :: Code -> LabelTable
 labels code = [(l, i) | (LABEL l, i) <- zip code [0 ..]]
 
-rewriteLabels :: Code -> Code
-rewriteLabels code = fmap rewriteJumps code
+rewriteJumps :: Code -> Code
+rewriteJumps code = fmap rewriteJumps' code
   where
     lt = labels code
-    rewriteJumps = \case
+    rewriteJumps' = \case
       JUMP label ->
         JUMP $
           fromMaybe
@@ -149,11 +153,10 @@ eval' code = do
   let pcm = pc m
       stackm = stack m
       memm = mem m
-      labelt = labels code
 
   case code !! pcm of
-    (PUSH int) -> put $ Machine (succ pcm) (int : stackm) memm
-    (PUSHV name) ->
+    PUSH int -> put $ Machine (succ pcm) (int : stackm) memm
+    PUSHV name ->
       put $
         Machine
           (succ pcm)
@@ -163,9 +166,9 @@ eval' code = do
             stackm
           )
           memm
-    (POP name) ->
+    POP name ->
       put $ Machine (succ pcm) (tail stackm) (updateMem memm (name, head stackm))
-    (DO op) -> do
+    DO op -> do
       let x = head stackm
           y = head $ tail stackm
           stack' = tail $ tail stackm
@@ -174,11 +177,11 @@ eval' code = do
         Sub -> put $ Machine (succ pcm) (y - x : stack') memm
         Mul -> put $ Machine (succ pcm) (y * x : stack') memm
         Div -> put $ Machine (succ pcm) (y `div` x : stack') memm
-    (JUMP label) ->
+    JUMP label ->
       put $ Machine (succ label) stackm memm
-    (JUMPZ label) ->
+    JUMPZ label ->
       put $ Machine (succ $ if head stackm == 0 then label else pcm) (tail stackm) memm
-    (LABEL _label) -> put $ Machine (succ pcm) stackm memm
+    LABEL _label -> put $ Machine (succ pcm) stackm memm
 
 -- Factorial example
 
