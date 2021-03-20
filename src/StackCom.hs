@@ -111,12 +111,12 @@ rewriteJumps code = fmap rewriteJumps' code
       JUMP label ->
         JUMP $
           fromMaybe
-            (error $ "JUMP: label " ++ show label ++ " is not in defined")
+            (error $ "JUMP: label " ++ show label ++ " is not defined")
             (lookup label lt)
       JUMPZ label ->
         JUMPZ $
           fromMaybe
-            (error $ "JUMPZ: label " ++ show label ++ " is not in defined")
+            (error $ "JUMPZ: label " ++ show label ++ " is not defined")
             (lookup label lt)
       inst -> inst
 
