@@ -1,4 +1,5 @@
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 
 module StackCom
@@ -11,10 +12,16 @@ module StackCom
 where
 
 import Control.Monad.State
-  ( MonadState (get, put),
-    State,
-    evalState,
-    execState,
+    ( gets,
+      evalState,
+      execState,
+      MonadState(put, get),
+      State,
+      StateT(StateT) )
+import Control.Monad.Writer
+  ( MonadWriter (tell),
+    WriterT (WriterT),
+    execWriterT,
   )
 import Data.Maybe (fromMaybe)
 
@@ -60,43 +67,51 @@ type Label = Int
 
 --  Compiler
 
--- possible optimizations:
+-- possible optimizationsi to reduce number of instructions to run:
 
 -- * write a value straight to memory rather than via stack
 
 -- * apply ops with one or both operands in memory
 
-comp :: Prog -> Code
-comp prog = rewriteJumps $ evalState (comp' prog) 0
+-- * get rid of the labels (they are not instructions)
 
-comp' :: Prog -> State Label Code
-comp' (Assign name expr) = return $ compExpr expr ++ [POP name]
+
+type VM a = WriterT Code (State Label) a
+
+newtype Compiled a = Compiled {unCompiled :: VM a}
+  deriving newtype (MonadWriter Code, Monad, Applicative, Functor, MonadState Label)
+
+comp :: Prog -> Code
+comp = rewriteJumps . flip evalState 0 . execWriterT . unCompiled . comp'
+
+comp' :: Prog -> Compiled ()
+comp' (Assign name expr) = do
+  tell (compExpr expr)
+  tell [POP name]
 comp' (If expr thenProg elseProg) = do
   label <- get
   let label' = succ label
   put $ succ label'
-  cthen <- comp' thenProg
-  celse <- comp' elseProg
-  return $
-    compExpr expr
-      ++ [JUMPZ label]
-      ++ cthen
-      ++ [JUMP label', LABEL label]
-      ++ celse
-      ++ [LABEL label']
+  tell $ compExpr expr
+  tell [JUMPZ label]
+  comp' thenProg
+  tell [JUMP label', LABEL label]
+  comp' elseProg
+  tell [LABEL label']
 comp' (While expr prog) = do
   label <- get
   let label' = succ label
   put $ succ label'
-  cprog <- comp' prog
-  return $
-    [LABEL label]
-      ++ compExpr expr
-      ++ [JUMPZ label']
-      ++ cprog
-      ++ [JUMP label, LABEL label']
-comp' (Seq progs) = concat <$> mapM comp' progs
---  concat <$> traverse comp' progs
+  tell [LABEL label]
+  tell $ compExpr expr
+  tell [JUMPZ label']
+  comp' prog
+  tell [JUMP label, LABEL label']
+comp' (Seq progs) = mapM_ comp' progs
+
+--comp' (Seq progs) = case progs of
+--  [] -> return ()
+--  (p : ps) -> comp' p >> comp' (Seq ps)
 
 compExpr :: Expr -> Code
 compExpr (Val i) = [PUSH i]
@@ -149,22 +164,22 @@ exec code = mem $ execState (eval code) (Machine 0 [] [])
 
 eval :: Code -> StateMachine
 eval code = do
-  m <- get
-  if pc m == length code then return () else eval' code >> eval code
+  pcm <- gets pc
+  if pcm == length code then return () else eval' code >> eval code
 
 eval' :: Code -> StateMachine
 eval' code = do
-  m <- get
-  let pcm = pc m
-      stackm = stack m
-      memm = mem m
+  pcm <- gets pc
+  stackm <- gets stack
+  memm <- gets mem
+  let pcm' = succ pcm
 
   case code !! pcm of
-    PUSH int -> put $ Machine (succ pcm) (int : stackm) memm
+    PUSH int -> put $ Machine pcm' (int : stackm) memm
     PUSHV name ->
       put $
         Machine
-          (succ pcm)
+          pcm'
           ( fromMaybe
               (error $ "PUSHV: " ++ show name ++ " is not in memory")
               (lookup name memm) :
@@ -172,21 +187,25 @@ eval' code = do
           )
           memm
     POP name ->
-      put $ Machine (succ pcm) (tail stackm) (updateMem memm (name, head stackm))
+      put $
+        Machine pcm' (tail stackm) (updateMem memm (name, head stackm))
     DO op -> do
       let x = head stackm
           y = head $ tail stackm
           stack' = tail $ tail stackm
       case op of
-        Add -> put $ Machine (succ pcm) (y + x : stack') memm
-        Sub -> put $ Machine (succ pcm) (y - x : stack') memm
-        Mul -> put $ Machine (succ pcm) (y * x : stack') memm
-        Div -> put $ Machine (succ pcm) (y `div` x : stack') memm
-    JUMP label ->
-      put $ Machine (succ label) stackm memm
+        Add -> put $ Machine pcm' (y + x : stack') memm
+        Sub -> put $ Machine pcm' (y - x : stack') memm
+        Mul -> put $ Machine pcm' (y * x : stack') memm
+        Div -> put $ Machine pcm' (y `div` x : stack') memm
+    JUMP label -> put $ Machine (succ label) stackm memm
     JUMPZ label ->
-      put $ Machine (succ $ if head stackm == 0 then label else pcm) (tail stackm) memm
-    LABEL _label -> put $ Machine (succ pcm) stackm memm
+      put $
+        Machine
+          (succ $ if head stackm == 0 then label else pcm)
+          (tail stackm)
+          memm
+    LABEL _label -> put $ Machine pcm' stackm memm
 
 -- Factorial example
 
