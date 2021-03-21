@@ -60,6 +60,12 @@ type Label = Int
 
 --  Compiler
 
+-- possible optimizations:
+
+-- * write a value straight to memory rather than via stack
+
+-- * apply ops with one or both operands in memory
+
 comp :: Prog -> Code
 comp prog = rewriteJumps $ evalState (comp' prog) 0
 
@@ -89,9 +95,8 @@ comp' (While expr prog) = do
       ++ [JUMPZ label']
       ++ cprog
       ++ [JUMP label, LABEL label']
-comp' (Seq progs) = do
-  code <- mapM comp' progs
-  return $ concat code
+comp' (Seq progs) = concat <$> mapM comp' progs
+--  concat <$> traverse comp' progs
 
 compExpr :: Expr -> Code
 compExpr (Val i) = [PUSH i]
