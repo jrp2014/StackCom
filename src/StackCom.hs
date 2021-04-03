@@ -1,6 +1,9 @@
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE TupleSections #-}
 
 module StackCom
   ( projectName,
@@ -11,13 +14,16 @@ module StackCom
   )
 where
 
+import Control.Monad.Fix
 import Control.Monad.State
-    ( gets,
-      evalState,
-      execState,
-      MonadState(put, get),
-      State,
-      StateT(StateT) )
+  ( MonadState (get, put),
+    State,
+    StateT (StateT),
+    evalState,
+    execState,
+    gets,
+    modify,
+  )
 import Control.Monad.Writer
   ( MonadWriter (tell),
     WriterT (WriterT),
@@ -65,6 +71,67 @@ data Inst
 
 type Label = Int
 
+--  -- Assembler
+
+newtype ASM a = ASM {unASM :: Label -> (Code, Label, a)} --  deriving (Functor)
+
+asm :: Label -> ASM a -> Code
+asm start (ASM f) = code where (code, _, _) = f start
+
+instance Functor ASM where
+  fmap f (ASM g) = ASM (\label -> let (c, l, a) = g label in (c, l, f a))
+
+instance Applicative ASM where
+  pure ret = ASM ([],,ret) -- \label -> ([], label, ret)
+  pf <*> px = ASM $ \start ->
+    let (code, next, f) = unASM pf start
+        (code', end, x) = unASM px next
+     in (code ++ code', end, f x)
+
+instance Monad ASM where
+  f >>= g = ASM $ \start ->
+    let (code, next, val) = unASM f start
+        (code', end, ret) = unASM (g val) next
+     in (code ++ code', end, ret)
+
+instance MonadFix ASM where
+  mfix f = ASM $ \start ->
+    let (code, end, ret) = unASM (f ret) start
+     in (code, end, ret)
+
+-- | assemble a single instruction
+assemble :: Inst -> ASM ()
+assemble inst = ASM $ \label -> ([inst], label + 1, ())
+
+here :: ASM Label
+here = ASM $ \label -> ([], label, label)
+
+compiler :: Prog -> ASM ()
+compiler (Assign name expr) = do
+  mapM_ assemble $ compExpr expr
+  assemble $ POP name
+compiler (If expr thenProg elseProg) = mdo
+  mapM_ assemble $  compExpr expr
+  assemble $ JUMPZ elze
+  compiler thenProg
+  assemble $ JUMPZ exit
+  elze <- here
+  compiler elseProg
+  exit <- here
+  return ()
+compiler (While expr prog) = mdo
+  begin <- here
+  mapM_ assemble $ compExpr expr
+  assemble $ JUMPZ exit
+  compiler prog
+  assemble $ JUMP begin
+  exit <- here
+  return ()
+compiler (Seq progs) = mapM_ compiler progs
+
+test = (unASM $ compiler (fac 10) ) 0
+
+--
 --  Compiler
 
 -- possible optimizationsi to reduce number of instructions to run:
@@ -75,11 +142,16 @@ type Label = Int
 
 -- * get rid of the labels (they are not instructions)
 
-
 type VM a = WriterT Code (State Label) a
 
 newtype Compiled a = Compiled {unCompiled :: VM a}
-  deriving newtype (MonadWriter Code, Monad, Applicative, Functor, MonadState Label)
+  deriving newtype (MonadFix, MonadWriter Code, Monad, Applicative, Functor, MonadState Label)
+
+
+label :: VM Label
+label = do
+  l <- get
+  return (l + 1)
 
 comp :: Prog -> Code
 comp = rewriteJumps . flip evalState 0 . execWriterT . unCompiled . comp'
