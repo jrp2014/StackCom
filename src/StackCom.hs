@@ -1,35 +1,25 @@
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DerivingStrategies         #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE RecursiveDo #-}
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE RecursiveDo                #-}
+
+
+-- See http://wall.org/~lewis/2013/10/15/asm-monad.html
 
 module StackCom
-  ( projectName,
-    comp,
-    exec,
-    run,
-    fac,
-  )
-where
+  ( projectName
+  , comp
+  , exec
+  , run
+  , fac
+  ) where
 
-import Control.Monad.Fix
-import Control.Monad.State
-  ( MonadState (get, put),
-    State,
-    StateT (StateT),
-    evalState,
-    execState,
-    gets,
-    modify,
-  )
-import Control.Monad.Writer
-  ( MonadWriter (tell),
-    WriterT (WriterT),
-    execWriterT,
-  )
-import Data.Maybe (fromMaybe)
+import           Control.Monad.Fix    (MonadFix)
+import           Control.Monad.State  (MonadState (get, put), State,
+                                       StateT (StateT), evalState, execState,
+                                       gets, modify)
+import           Control.Monad.Writer (MonadWriter (tell), WriterT (WriterT),
+                                       execWriterT)
+import           Data.Maybe           (fromMaybe)
 
 projectName :: String
 projectName = "StackCom"
@@ -66,73 +56,11 @@ data Inst
   | DO Op
   | JUMP Label
   | JUMPZ Label
-  | LABEL Label
+  -- --| LABEL Label -- Not needed; this version calculates them
   deriving stock (Show)
 
-type Label = Int
+type Label = Int -- an index into the program counter
 
---  -- Assembler
-
-newtype ASM a = ASM {unASM :: Label -> (Code, Label, a)} --  deriving (Functor)
-
-asm :: Label -> ASM a -> Code
-asm start (ASM f) = code where (code, _, _) = f start
-
-instance Functor ASM where
-  fmap f (ASM g) = ASM (\label -> let (c, l, a) = g label in (c, l, f a))
-
-instance Applicative ASM where
-  pure ret = ASM ([],,ret) -- \label -> ([], label, ret)
-  pf <*> px = ASM $ \start ->
-    let (code, next, f) = unASM pf start
-        (code', end, x) = unASM px next
-     in (code ++ code', end, f x)
-
-instance Monad ASM where
-  f >>= g = ASM $ \start ->
-    let (code, next, val) = unASM f start
-        (code', end, ret) = unASM (g val) next
-     in (code ++ code', end, ret)
-
-instance MonadFix ASM where
-  mfix f = ASM $ \start ->
-    let (code, end, ret) = unASM (f ret) start
-     in (code, end, ret)
-
--- | assemble a single instruction
-assemble :: Inst -> ASM ()
-assemble inst = ASM $ \label -> ([inst], label + 1, ())
-
-here :: ASM Label
-here = ASM $ \label -> ([], label, label)
-{-
-compiler :: Prog -> ASM ()
-compiler (Assign name expr) = do
-  mapM_ assemble $ compExpr expr
-  assemble $ POP name
-compiler (If expr thenProg elseProg) = mdo
-  mapM_ assemble $  compExpr expr
-  assemble $ JUMPZ elze
-  compiler thenProg
-  assemble $ JUMPZ exit
-  elze <- here
-  compiler elseProg
-  exit <- here
-  return ()
-compiler (While expr prog) = mdo
-  begin <- here
-  mapM_ assemble $ compExpr expr
-  assemble $ JUMPZ exit
-  compiler prog
-  assemble $ JUMP begin
-  exit <- here
-  return ()
-compiler (Seq progs) = mapM_ compiler progs
-
-test = (unASM $ compiler (fac 10) ) 0
--}
-
---
 --  Compiler
 
 -- possible optimizationsi to reduce number of instructions to run:
@@ -141,45 +69,46 @@ test = (unASM $ compiler (fac 10) ) 0
 
 -- * apply ops with one or both operands in memory
 
--- * get rid of the labels (they are not instructions)
-
 type VM a = WriterT Code (State Label) a
 
 newtype Compiled a = Compiled {unCompiled :: VM a}
   deriving newtype (MonadFix, MonadWriter Code, Monad, Applicative, Functor, MonadState Label)
 
 
-emitInstr :: Inst -> Compiled ()
-emitInstr inst = do
-  modify (+1)
+-- | Increment the instruction counter (Label) and write the instruction
+genInstr :: Inst -> Compiled ()
+genInstr inst = do
+  modify (+ 1)
   tell [inst]
 
--- | Instruction generation
+-- | Instruction generation, for readabilty
 pushInstr :: Int -> Compiled ()
-pushInstr int = emitInstr $ PUSH int
+pushInstr int = genInstr $ PUSH int
 
 pushvInstr :: Name -> Compiled ()
-pushvInstr int = emitInstr $ PUSHV int
+pushvInstr int = genInstr $ PUSHV int
 
 popInstr :: Name -> Compiled ()
-popInstr name = emitInstr $ POP name
+popInstr name = genInstr $ POP name
 
 doInstr :: Op -> Compiled ()
-doInstr op = emitInstr $ DO op
+doInstr op = genInstr $ DO op
 
 jumpInstr :: Label -> Compiled ()
-jumpInstr label = emitInstr $ JUMP label
+jumpInstr label = genInstr $ JUMP label
 
 jumpzInstr :: Label -> Compiled ()
-jumpzInstr label = emitInstr $ JUMPZ label
+jumpzInstr label = genInstr $ JUMPZ label
 
 -- | generate a new label
 label :: Compiled Label
-label = do get
+label = do
+  get
 
 comp :: Prog -> Code
 comp = flip evalState 0 . execWriterT . unCompiled . comp'
 
+-- | The recursive mdo allows forward labels to be calculated
 comp' :: Prog -> Compiled ()
 comp' (Assign name expr) = do
   compExpr expr
@@ -208,43 +137,21 @@ comp' (Seq progs) = mapM_ comp' progs
 --  (p : ps) -> comp' p >> comp' (Seq ps)
 
 compExpr :: Expr -> Compiled ()
-compExpr (Val i) = pushInstr i
-compExpr (Var name) = pushvInstr name
+compExpr (Val i     ) = pushInstr i
+compExpr (Var name  ) = pushvInstr name
 compExpr (App op l r) = do
-   compExpr l
-   compExpr r
-   doInstr op
-
-type LabelTable = [(Label, Int)]
-
-labels :: Code -> LabelTable
-labels code = [(l, i) | (LABEL l, i) <- zip code [0 ..]]
-
-rewriteJumps :: Code -> Code
-rewriteJumps code = fmap rewriteJumps' code
-  where
-    lt = labels code
-    rewriteJumps' = \case
-      JUMP label ->
-        JUMP $
-          fromMaybe
-            (error $ "JUMP: label " ++ show label ++ " is not defined")
-            (lookup label lt)
-      JUMPZ label ->
-        JUMPZ $
-          fromMaybe
-            (error $ "JUMPZ: label " ++ show label ++ " is not defined")
-            (lookup label lt)
-      inst -> inst
+  compExpr l
+  compExpr r
+  doInstr op
 
 -- Machine
 
 data Machine = Machine
-  { pc :: Int,
-    stack :: Stack,
-    mem :: Mem
+  { pc    :: Int
+  , stack :: Stack
+  , mem   :: Mem
   }
-  deriving stock (Show)
+  deriving stock Show
 
 type StateMachine = State Machine ()
 
@@ -266,56 +173,46 @@ eval code = do
 
 eval' :: Code -> StateMachine
 eval' code = do
-  pcm <- gets pc
+  pcm    <- gets pc
   stackm <- gets stack
-  memm <- gets mem
+  memm   <- gets mem
   let pcm' = succ pcm
 
   case code !! pcm of
-    PUSH int -> put $ Machine pcm' (int : stackm) memm
-    PUSHV name ->
-      put $
-        Machine
-          pcm'
-          ( fromMaybe
-              (error $ "PUSHV: " ++ show name ++ " is not in memory")
-              (lookup name memm) :
-            stackm
-          )
-          memm
+    PUSH  int  -> put $ Machine pcm' (int : stackm) memm
+    PUSHV name -> put $ Machine
+      pcm'
+      ( fromMaybe (error $ "PUSHV: " ++ show name ++ " is not in memory")
+                  (lookup name memm)
+      : stackm
+      )
+      memm
     POP name ->
-      put $
-        Machine pcm' (tail stackm) (updateMem memm (name, head stackm))
+      put $ Machine pcm' (tail stackm) (updateMem memm (name, head stackm))
     DO op -> do
-      let x = head stackm
-          y = head $ tail stackm
+      let x      = head stackm
+          y      = head $ tail stackm
           stack' = tail $ tail stackm
       case op of
         Add -> put $ Machine pcm' (y + x : stack') memm
         Sub -> put $ Machine pcm' (y - x : stack') memm
         Mul -> put $ Machine pcm' (y * x : stack') memm
         Div -> put $ Machine pcm' (y `div` x : stack') memm
-    JUMP label -> put $ Machine label stackm memm
-    JUMPZ label ->
-      put $
-        Machine
-          (if head stackm == 0 then label else pcm')
-          (tail stackm)
-          memm
-    LABEL _label -> error "LABEL found, but should not appear in generated code"
+    JUMP  label -> put $ Machine label stackm memm
+    JUMPZ label -> put
+      $ Machine (if head stackm == 0 then label else pcm') stackm memm
 
 -- Factorial example
 
 fac :: Int -> Prog
-fac n =
-  Seq
-    [ Assign 'A' (Val 1),
-      Assign 'B' (Val n),
-      While
-        (Var 'B')
-        ( Seq
-            [ Assign 'A' (App Mul (Var 'A') (Var 'B')),
-              Assign 'B' (App Sub (Var 'B') (Val (1)))
-            ]
-        )
-    ]
+fac n = Seq
+  [ Assign 'A' (Val 1)
+  , Assign 'B' (Val n)
+  , While
+    (Var 'B')
+    (Seq
+      [ Assign 'A' (App Mul (Var 'A') (Var 'B'))
+      , Assign 'B' (App Sub (Var 'B') (Val (1)))
+      ]
+    )
+  ]
