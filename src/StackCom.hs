@@ -105,7 +105,7 @@ assemble inst = ASM $ \label -> ([inst], label + 1, ())
 
 here :: ASM Label
 here = ASM $ \label -> ([], label, label)
-
+{-
 compiler :: Prog -> ASM ()
 compiler (Assign name expr) = do
   mapM_ assemble $ compExpr expr
@@ -130,6 +130,7 @@ compiler (While expr prog) = mdo
 compiler (Seq progs) = mapM_ compiler progs
 
 test = (unASM $ compiler (fac 10) ) 0
+-}
 
 --
 --  Compiler
@@ -148,47 +149,71 @@ newtype Compiled a = Compiled {unCompiled :: VM a}
   deriving newtype (MonadFix, MonadWriter Code, Monad, Applicative, Functor, MonadState Label)
 
 
-label :: VM Label
-label = do
-  l <- get
-  return (l + 1)
+emitInstr :: Inst -> Compiled ()
+emitInstr inst = do
+  modify (+1)
+  tell [inst]
+
+-- | Instruction generation
+pushInstr :: Int -> Compiled ()
+pushInstr int = emitInstr $ PUSH int
+
+pushvInstr :: Name -> Compiled ()
+pushvInstr int = emitInstr $ PUSHV int
+
+popInstr :: Name -> Compiled ()
+popInstr name = emitInstr $ POP name
+
+doInstr :: Op -> Compiled ()
+doInstr op = emitInstr $ DO op
+
+jumpInstr :: Label -> Compiled ()
+jumpInstr label = emitInstr $ JUMP label
+
+jumpzInstr :: Label -> Compiled ()
+jumpzInstr label = emitInstr $ JUMPZ label
+
+-- | generate a new label
+label :: Compiled Label
+label = do get
 
 comp :: Prog -> Code
-comp = rewriteJumps . flip evalState 0 . execWriterT . unCompiled . comp'
+comp = flip evalState 0 . execWriterT . unCompiled . comp'
 
 comp' :: Prog -> Compiled ()
 comp' (Assign name expr) = do
-  tell (compExpr expr)
-  tell [POP name]
-comp' (If expr thenProg elseProg) = do
-  label <- get
-  let label' = succ label
-  put $ succ label'
-  tell $ compExpr expr
-  tell [JUMPZ label]
+  compExpr expr
+  popInstr name
+comp' (If expr thenProg elseProg) = mdo
+  compExpr expr
+  jumpzInstr elze
   comp' thenProg
-  tell [JUMP label', LABEL label]
+  jumpInstr end
+  elze <- label
   comp' elseProg
-  tell [LABEL label']
-comp' (While expr prog) = do
-  label <- get
-  let label' = succ label
-  put $ succ label'
-  tell [LABEL label]
-  tell $ compExpr expr
-  tell [JUMPZ label']
+  end <- label
+  return ()
+comp' (While expr prog) = mdo
+  begin <- label
+  compExpr expr
+  jumpzInstr end
   comp' prog
-  tell [JUMP label, LABEL label']
+  jumpInstr begin
+  end <- label
+  return ()
 comp' (Seq progs) = mapM_ comp' progs
 
 --comp' (Seq progs) = case progs of
 --  [] -> return ()
 --  (p : ps) -> comp' p >> comp' (Seq ps)
 
-compExpr :: Expr -> Code
-compExpr (Val i) = [PUSH i]
-compExpr (Var name) = [PUSHV name]
-compExpr (App op l r) = compExpr l ++ compExpr r ++ [DO op]
+compExpr :: Expr -> Compiled ()
+compExpr (Val i) = pushInstr i
+compExpr (Var name) = pushvInstr name
+compExpr (App op l r) = do
+   compExpr l
+   compExpr r
+   doInstr op
 
 type LabelTable = [(Label, Int)]
 
@@ -270,14 +295,14 @@ eval' code = do
         Sub -> put $ Machine pcm' (y - x : stack') memm
         Mul -> put $ Machine pcm' (y * x : stack') memm
         Div -> put $ Machine pcm' (y `div` x : stack') memm
-    JUMP label -> put $ Machine (succ label) stackm memm
+    JUMP label -> put $ Machine label stackm memm
     JUMPZ label ->
       put $
         Machine
-          (succ $ if head stackm == 0 then label else pcm)
+          (if head stackm == 0 then label else pcm')
           (tail stackm)
           memm
-    LABEL _label -> put $ Machine pcm' stackm memm
+    LABEL _label -> error "LABEL found, but should not appear in generated code"
 
 -- Factorial example
 
